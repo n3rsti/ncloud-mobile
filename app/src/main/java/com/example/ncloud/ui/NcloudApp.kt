@@ -1,6 +1,7 @@
 package com.example.ncloud.ui
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -31,9 +32,11 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -138,11 +141,16 @@ fun NcloudApp() {
 
     fun refreshCurrentDirectory(activeDirectory: NcloudDirectory) {
         scope.launch {
+            loading = true
+            error = null
+
             try {
                 directory = api().loadDirectory(activeDirectory.id)
                 searchRevision++
             } catch (e: Exception) {
                 handleFailure(e, "Failed to refresh directory")
+            } finally {
+                loading = false
             }
         }
     }
@@ -368,6 +376,18 @@ fun NcloudApp() {
         }
     }
 
+    fun navigateBack() {
+        if (searchQuery.isNotBlank()) {
+            clearSearch()
+            return
+        }
+
+        if (history.isNotEmpty()) {
+            val previous = history.removeAt(history.lastIndex)
+            loadDirectory(previous, false, true)
+        }
+    }
+
     LaunchedEffect(session?.username) {
         if (session != null && directory == null && !loading) {
             loadDirectory()
@@ -423,18 +443,13 @@ fun NcloudApp() {
                 error = error,
                 searchQuery = searchQuery,
                 searchResults = searchResults,
-                canGoBack = history.isNotEmpty(),
+                canNavigateBack = history.isNotEmpty() || searchQuery.isNotBlank(),
                 onSearchQueryChange = { searchQuery = it },
                 onOpenDirectory = { loadDirectory(it, true, true) },
                 onRefresh = {
                     directory?.current?.let { refreshCurrentDirectory(it) }
                 },
-                onBack = {
-                    if (history.isNotEmpty()) {
-                        val previous = history.removeAt(history.lastIndex)
-                        loadDirectory(previous, false, true)
-                    }
-                },
+                onNavigateBack = { navigateBack() },
                 onLogout = { logout() },
                 onCreateFolder = { createFolder(it) },
                 onUpload = { uploadFiles(it) },
@@ -554,7 +569,7 @@ fun AuthScreen(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun DriveScreen(
     username: String,
@@ -564,11 +579,11 @@ fun DriveScreen(
     error: String?,
     searchQuery: String,
     searchResults: SearchResults?,
-    canGoBack: Boolean,
+    canNavigateBack: Boolean,
     onSearchQueryChange: (String) -> Unit,
     onOpenDirectory: (NcloudDirectory) -> Unit,
     onRefresh: () -> Unit,
-    onBack: () -> Unit,
+    onNavigateBack: () -> Unit,
     onLogout: () -> Unit,
     onCreateFolder: (String) -> Unit,
     onUpload: (List<Uri>) -> Unit,
@@ -596,6 +611,10 @@ fun DriveScreen(
         searchResults?.files.orEmpty()
     } else {
         directory?.files.orEmpty()
+    }
+
+    BackHandler(enabled = canNavigateBack) {
+        onNavigateBack()
     }
 
     val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
@@ -684,22 +703,6 @@ fun DriveScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Button(
-                        enabled = canGoBack && !loading,
-                        onClick = onBack,
-                        colors = ButtonDefaults.buttonColors(containerColor = AppPanel)
-                    ) {
-                        Text("Back")
-                    }
-
-                    Button(
-                        enabled = !loading,
-                        onClick = onRefresh,
-                        colors = ButtonDefaults.buttonColors(containerColor = AppPanel)
-                    ) {
-                        Text("Refresh")
-                    }
-
-                    Button(
                         enabled = directory != null && !loading,
                         onClick = { showCreateFolder = true },
                         colors = ButtonDefaults.buttonColors(containerColor = AppPurple)
@@ -729,7 +732,11 @@ fun DriveScreen(
                 }
             }
 
-            Box(Modifier.fillMaxSize()) {
+            PullToRefreshBox(
+                isRefreshing = loading,
+                onRefresh = onRefresh,
+                modifier = Modifier.fillMaxSize()
+            ) {
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(145.dp),
                     contentPadding = PaddingValues(16.dp),
@@ -770,7 +777,7 @@ fun DriveScreen(
                     }
                 }
 
-                if (loading || searching) {
+                if (searching) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
