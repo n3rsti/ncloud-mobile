@@ -26,21 +26,37 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -54,6 +70,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -70,6 +87,7 @@ import com.example.ncloud.models.SessionExpiredException
 import com.example.ncloud.models.itemName
 import com.example.ncloud.network.NcloudApi
 import com.example.ncloud.session.SessionStore
+import com.example.ncloud.util.directoryIdFromAccessKey
 import com.example.ncloud.util.formatTimestamp
 import com.example.ncloud.util.readableSize
 import kotlinx.coroutines.delay
@@ -187,6 +205,35 @@ fun NcloudApp() {
                 loading = false
             }
         }
+    }
+
+    fun openDriveRoot() {
+        history.clear()
+        loadDirectory(null, false, true)
+    }
+
+    fun openTrash() {
+        val trashAccessKey = session?.trashAccessKey.orEmpty()
+        val trashDirectoryId = directoryIdFromAccessKey(trashAccessKey)
+
+        if (trashDirectoryId.isNullOrBlank()) {
+            error = "Could not open trash"
+            return
+        }
+
+        history.clear()
+        loadDirectory(
+            target = NcloudDirectory(
+                id = trashDirectoryId,
+                name = "Trash",
+                parentDirectory = null,
+                accessKey = trashAccessKey,
+                created = 0L,
+                modified = 0L
+            ),
+            pushHistory = false,
+            resetSearch = true
+        )
     }
 
     fun authenticate(username: String, password: String, register: Boolean) {
@@ -435,6 +482,9 @@ fun NcloudApp() {
                 }
             )
         } else {
+            val trashId = directoryIdFromAccessKey(session?.trashAccessKey.orEmpty())
+            val isTrash = directory?.current?.id == trashId
+
             DriveScreen(
                 username = session?.username.orEmpty(),
                 directory = directory,
@@ -444,12 +494,15 @@ fun NcloudApp() {
                 searchQuery = searchQuery,
                 searchResults = searchResults,
                 canNavigateBack = history.isNotEmpty() || searchQuery.isNotBlank(),
+                isTrash = isTrash,
                 onSearchQueryChange = { searchQuery = it },
                 onOpenDirectory = { loadDirectory(it, true, true) },
                 onRefresh = {
                     directory?.current?.let { refreshCurrentDirectory(it) }
                 },
                 onNavigateBack = { navigateBack() },
+                onOpenDrive = { openDriveRoot() },
+                onOpenTrash = { openTrash() },
                 onLogout = { logout() },
                 onCreateFolder = { createFolder(it) },
                 onUpload = { uploadFiles(it) },
@@ -580,10 +633,13 @@ fun DriveScreen(
     searchQuery: String,
     searchResults: SearchResults?,
     canNavigateBack: Boolean,
+    isTrash: Boolean,
     onSearchQueryChange: (String) -> Unit,
     onOpenDirectory: (NcloudDirectory) -> Unit,
     onRefresh: () -> Unit,
     onNavigateBack: () -> Unit,
+    onOpenDrive: () -> Unit,
+    onOpenTrash: () -> Unit,
     onLogout: () -> Unit,
     onCreateFolder: (String) -> Unit,
     onUpload: (List<Uri>) -> Unit,
@@ -594,13 +650,17 @@ fun DriveScreen(
     onMoveDirectoryToTrash: (NcloudDirectory) -> Unit
 ) {
     var showCreateFolder by remember { mutableStateOf(false) }
+    var searchVisible by remember { mutableStateOf(false) }
     var selectedTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var detailsTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var renameTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var deleteTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var pendingDownloadFile by remember { mutableStateOf<NcloudFile?>(null) }
 
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
     val searchActive = searchQuery.trim().isNotBlank()
+
     val folders = if (searchActive) {
         searchResults?.directories.orEmpty()
     } else {
@@ -613,7 +673,11 @@ fun DriveScreen(
         directory?.files.orEmpty()
     }
 
-    BackHandler(enabled = canNavigateBack) {
+    BackHandler(enabled = canNavigateBack || searchVisible) {
+        if (searchVisible) {
+            searchVisible = false
+        }
+
         onNavigateBack()
     }
 
@@ -631,160 +695,187 @@ fun DriveScreen(
         pendingDownloadFile = null
     }
 
-    Scaffold(
-        containerColor = AppBg,
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = { uploadLauncher.launch("*/*") },
-                containerColor = AppPurple,
-                contentColor = Color.White
-            ) {
-                Text("Upload")
-            }
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            NcloudDrawer(
+                username = username,
+                isTrash = isTrash,
+                onOpenDrive = {
+                    searchVisible = false
+                    scope.launch {
+                        drawerState.close()
+                        onOpenDrive()
+                    }
+                },
+                onOpenTrash = {
+                    searchVisible = false
+                    scope.launch {
+                        drawerState.close()
+                        onOpenTrash()
+                    }
+                }
+            )
         }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .padding(innerPadding)
-                .fillMaxSize()
-                .background(AppBg)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(AppTop)
-                    .padding(horizontal = 18.dp, vertical = 16.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "Ncloud",
-                        color = AppText,
-                        style = MaterialTheme.typography.titleLarge
-                    )
-
-                    Spacer(Modifier.weight(1f))
-
-                    TextButton(onClick = onLogout) {
-                        Text("Logout")
-                    }
-                }
-
-                Text(
-                    text = username,
-                    color = AppMuted,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(18.dp)
-            ) {
-                SearchBar(
-                    query = searchQuery,
-                    onQueryChange = onSearchQueryChange
-                )
-
-                Spacer(Modifier.height(16.dp))
-
-                Text(
-                    text = if (searchActive) "Global search results" else directory?.current?.name ?: "Drive",
-                    color = AppText,
-                    style = MaterialTheme.typography.headlineSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                Spacer(Modifier.height(14.dp))
-
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Scaffold(
+            containerColor = AppBg,
+            floatingActionButton = {
+                FloatingActionButton(
+                    onClick = { uploadLauncher.launch("*/*") },
+                    containerColor = AppPurple,
+                    contentColor = Color.White
                 ) {
-                    Button(
-                        enabled = directory != null && !loading,
-                        onClick = { showCreateFolder = true },
-                        colors = ButtonDefaults.buttonColors(containerColor = AppPurple)
+                    Icon(
+                        imageVector = Icons.Filled.Upload,
+                        contentDescription = "Upload"
+                    )
+                }
+            }
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .padding(innerPadding)
+                    .fillMaxSize()
+                    .background(AppBg)
+            ) {
+                AppHeader(
+                    onMenuClick = {
+                        scope.launch {
+                            drawerState.open()
+                        }
+                    },
+                    onSearchClick = {
+                        searchVisible = true
+                    },
+                    onLogout = onLogout
+                )
+
+                if (searchVisible || searchActive) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(AppTop)
+                            .padding(horizontal = 16.dp, vertical = 10.dp)
                     ) {
-                        Text("New folder")
+                        SearchBar(
+                            query = searchQuery,
+                            onQueryChange = onSearchQueryChange,
+                            onClose = {
+                                onSearchQueryChange("")
+                                searchVisible = false
+                            }
+                        )
                     }
                 }
 
-                if (searchActive) {
-                    Spacer(Modifier.height(10.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 18.dp)
+                ) {
                     Text(
-                        text = "Searching across your drive",
-                        color = AppMuted,
-                        style = MaterialTheme.typography.bodySmall,
+                        text = if (searchActive) "Global search results" else directory?.current?.name ?: "Drive",
+                        color = AppText,
+                        style = MaterialTheme.typography.headlineSmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+
+                    Spacer(Modifier.height(14.dp))
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Button(
+                            enabled = directory != null && !loading,
+                            onClick = { showCreateFolder = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = AppPurple),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("New folder")
+                        }
+                    }
+
+                    if (searchActive) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            text = "Searching across your drive",
+                            color = AppMuted,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    if (error != null) {
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            text = error,
+                            color = AppError,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
                 }
 
-                if (error != null) {
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        text = error,
-                        color = AppError,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-            }
-
-            PullToRefreshBox(
-                isRefreshing = loading,
-                onRefresh = onRefresh,
-                modifier = Modifier.fillMaxSize()
-            ) {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(145.dp),
-                    contentPadding = PaddingValues(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                PullToRefreshBox(
+                    isRefreshing = loading,
+                    onRefresh = onRefresh,
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(folders, key = { "dir-${it.id}" }) { folder ->
-                        FolderCard(
-                            folder = folder,
-                            onClick = { onOpenDirectory(folder) },
-                            onMenuClick = {
-                                selectedTarget = NcloudActionTarget.DirectoryTarget(folder)
-                            }
-                        )
-                    }
-
-                    items(files, key = { "file-${it.id}" }) { file ->
-                        FileCard(
-                            file = file,
-                            onClick = {},
-                            onMenuClick = {
-                                selectedTarget = NcloudActionTarget.FileTarget(file)
-                            }
-                        )
-                    }
-                }
-
-                if (directory != null && folders.isEmpty() && files.isEmpty() && !loading && !searching) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(145.dp),
+                        contentPadding = PaddingValues(16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxSize()
                     ) {
-                        Text(
-                            text = if (searchActive) "No results found" else "This folder is empty",
-                            color = AppMuted
-                        )
-                    }
-                }
+                        items(folders, key = { "dir-${it.id}" }) { folder ->
+                            FolderCard(
+                                folder = folder,
+                                onClick = {
+                                    searchVisible = false
+                                    onOpenDirectory(folder)
+                                },
+                                onMenuClick = {
+                                    selectedTarget = NcloudActionTarget.DirectoryTarget(folder)
+                                }
+                            )
+                        }
 
-                if (searching) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(AppBg.copy(alpha = 0.62f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator()
+                        items(files, key = { "file-${it.id}" }) { file ->
+                            FileCard(
+                                file = file,
+                                onClick = {},
+                                onMenuClick = {
+                                    selectedTarget = NcloudActionTarget.FileTarget(file)
+                                }
+                            )
+                        }
+                    }
+
+                    if (directory != null && folders.isEmpty() && files.isEmpty() && !loading && !searching) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (searchActive) "No results found" else "This folder is empty",
+                                color = AppMuted
+                            )
+                        }
+                    }
+
+                    if (searching) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(AppBg.copy(alpha = 0.62f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator()
+                        }
                     }
                 }
             }
@@ -886,7 +977,153 @@ fun DriveScreen(
 }
 
 @Composable
-fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
+fun AppHeader(
+    onMenuClick: () -> Unit,
+    onSearchClick: () -> Unit,
+    onLogout: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(58.dp)
+            .background(AppTop)
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onMenuClick) {
+            Icon(
+                imageVector = Icons.Filled.Menu,
+                contentDescription = "Open menu",
+                tint = AppMuted
+            )
+        }
+
+        Spacer(Modifier.weight(1f))
+
+        IconButton(onClick = onSearchClick) {
+            Icon(
+                imageVector = Icons.Filled.Search,
+                contentDescription = "Search",
+                tint = AppMuted
+            )
+        }
+
+        IconButton(onClick = onLogout) {
+            Icon(
+                imageVector = Icons.Filled.Logout,
+                contentDescription = "Logout",
+                tint = AppMuted
+            )
+        }
+    }
+}
+
+@Composable
+fun NcloudDrawer(
+    username: String,
+    isTrash: Boolean,
+    onOpenDrive: () -> Unit,
+    onOpenTrash: () -> Unit
+) {
+    ModalDrawerSheet(
+        drawerContainerColor = AppTop,
+        drawerContentColor = AppText,
+        modifier = Modifier.width(290.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 22.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Cloud,
+                contentDescription = null,
+                tint = AppPurple
+            )
+
+            Spacer(Modifier.width(12.dp))
+
+            Column {
+                Text(
+                    text = "Ncloud",
+                    color = AppText,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Text(
+                    text = username,
+                    color = AppMuted,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        HorizontalDivider(color = AppPanel)
+
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            DrawerItem(
+                label = "Drive",
+                icon = Icons.Filled.Folder,
+                selected = !isTrash,
+                onClick = onOpenDrive
+            )
+
+            DrawerItem(
+                label = "Trash",
+                icon = Icons.Filled.Delete,
+                selected = isTrash,
+                onClick = onOpenTrash
+            )
+        }
+    }
+}
+
+@Composable
+fun DrawerItem(
+    label: String,
+    icon: ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(7.dp))
+            .background(if (selected) AppPanel else Color.Transparent)
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (selected) AppText else AppMuted
+        )
+
+        Spacer(Modifier.width(14.dp))
+
+        Text(
+            text = label,
+            color = if (selected) AppText else AppMuted,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+fun SearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onClose: () -> Unit
+) {
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
@@ -897,17 +1134,19 @@ fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
             )
         },
         leadingIcon = {
-            Text(
-                text = "⌕",
-                color = AppMuted,
-                style = MaterialTheme.typography.titleLarge
+            Icon(
+                imageVector = Icons.Filled.Search,
+                contentDescription = null,
+                tint = AppMuted
             )
         },
         trailingIcon = {
-            if (query.isNotBlank()) {
-                TextButton(onClick = { onQueryChange("") }) {
-                    Text("Clear")
-                }
+            IconButton(onClick = onClose) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = "Close search",
+                    tint = AppMuted
+                )
             }
         },
         singleLine = true,
@@ -1032,7 +1271,7 @@ fun FolderShape() {
                 .width(42.dp)
                 .height(13.dp)
                 .clip(RoundedCornerShape(topStart = 5.dp, topEnd = 5.dp))
-                .background(AppBlue)
+                .background(AppPurple)
         )
 
         Box(
@@ -1040,7 +1279,7 @@ fun FolderShape() {
                 .width(68.dp)
                 .height(44.dp)
                 .clip(RoundedCornerShape(8.dp))
-                .background(AppBlue)
+                .background(AppPurple)
         )
     }
 }
