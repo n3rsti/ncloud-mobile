@@ -50,6 +50,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,6 +67,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.ncloud.ui.theme.NcloudTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -73,6 +75,7 @@ import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -118,6 +121,11 @@ data class NcloudFile(
 
 data class DirectoryBundle(
     val current: NcloudDirectory,
+    val directories: List<NcloudDirectory>,
+    val files: List<NcloudFile>
+)
+
+data class SearchResults(
     val directories: List<NcloudDirectory>,
     val files: List<NcloudFile>
 )
@@ -177,6 +185,30 @@ class NcloudApi(private val baseUrl: String) {
         }
 
         parseDirectoryBundle(array.getJSONObject(0))
+    }
+
+    suspend fun searchDirectory(
+        session: AuthSession,
+        directory: NcloudDirectory,
+        query: String
+    ): SearchResults = withContext(Dispatchers.IO) {
+        val encodedName = URLEncoder.encode(query, "UTF-8")
+        val encodedParent = URLEncoder.encode(directory.id, "UTF-8")
+
+        val response = request(
+            method = "GET",
+            path = "/api/directories/search?name=$encodedName&parent_directory=$encodedParent",
+            accessToken = session.accessToken
+        )
+
+        val json = JSONObject(response)
+        val directories = (json.optJSONArray("Directories") ?: json.optJSONArray("directories")).toDirectoryList()
+        val files = (json.optJSONArray("Files") ?: json.optJSONArray("files")).toFileList()
+
+        SearchResults(
+            directories = directories,
+            files = files
+        )
     }
 
     suspend fun createDirectory(session: AuthSession, parent: NcloudDirectory, name: String): NcloudDirectory = withContext(Dispatchers.IO) {
@@ -519,11 +551,25 @@ fun NcloudApp() {
     var session by remember { mutableStateOf(loadSession(context)) }
     var directory by remember { mutableStateOf<DirectoryBundle?>(null) }
     var loading by remember { mutableStateOf(false) }
+    var searching by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var searchQuery by remember { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf<SearchResults?>(null) }
+    var searchRevision by remember { mutableIntStateOf(0) }
 
     fun api() = NcloudApi(baseUrl)
 
-    fun loadDirectory(target: NcloudDirectory? = null, pushHistory: Boolean = false) {
+    fun clearSearch() {
+        searchQuery = ""
+        searchResults = null
+        searching = false
+    }
+
+    fun loadDirectory(
+        target: NcloudDirectory? = null,
+        pushHistory: Boolean = false,
+        resetSearch: Boolean = false
+    ) {
         val activeSession = session ?: return
 
         scope.launch {
@@ -538,7 +584,13 @@ fun NcloudApp() {
                 }
 
                 directory = loaded
+
+                if (resetSearch) {
+                    clearSearch()
+                }
+
                 saveBaseUrl(context, baseUrl)
+                searchRevision++
             } catch (e: Exception) {
                 error = e.message ?: "Failed to load directory"
             } finally {
@@ -569,7 +621,9 @@ fun NcloudApp() {
                 saveSession(context, result)
                 saveBaseUrl(context, baseUrl)
                 history.clear()
+                clearSearch()
                 directory = api().loadDirectory(result, null)
+                searchRevision++
             } catch (e: Exception) {
                 error = e.message ?: "Authentication failed"
             } finally {
@@ -582,6 +636,7 @@ fun NcloudApp() {
         session = null
         directory = null
         history.clear()
+        clearSearch()
         clearSession(context)
     }
 
@@ -596,6 +651,7 @@ fun NcloudApp() {
             try {
                 api().createDirectory(activeSession, activeDirectory, name)
                 directory = api().loadDirectory(activeSession, activeDirectory.id)
+                searchRevision++
             } catch (e: Exception) {
                 error = e.message ?: "Failed to create folder"
             } finally {
@@ -617,6 +673,7 @@ fun NcloudApp() {
             try {
                 api().uploadFiles(context, activeSession, activeDirectory, uris)
                 directory = api().loadDirectory(activeSession, activeDirectory.id)
+                searchRevision++
             } catch (e: Exception) {
                 error = e.message ?: "Failed to upload files"
             } finally {
@@ -640,6 +697,7 @@ fun NcloudApp() {
 
                 api().renameFile(activeSession, activeDirectory, file, newName.trim())
                 directory = api().loadDirectory(activeSession, activeDirectory.id)
+                searchRevision++
             } catch (e: Exception) {
                 error = e.message ?: "Failed to rename file"
             } finally {
@@ -659,6 +717,7 @@ fun NcloudApp() {
             try {
                 api().moveFileToTrash(activeSession, activeDirectory, file)
                 directory = api().loadDirectory(activeSession, activeDirectory.id)
+                searchRevision++
             } catch (e: Exception) {
                 error = e.message ?: "Failed to move file to trash"
             } finally {
@@ -700,6 +759,7 @@ fun NcloudApp() {
 
                 api().renameDirectory(activeSession, targetDirectory, newName.trim())
                 directory = api().loadDirectory(activeSession, activeDirectory.id)
+                searchRevision++
             } catch (e: Exception) {
                 error = e.message ?: "Failed to rename directory"
             } finally {
@@ -719,6 +779,7 @@ fun NcloudApp() {
             try {
                 api().moveDirectoryToTrash(activeSession, activeDirectory, targetDirectory)
                 directory = api().loadDirectory(activeSession, activeDirectory.id)
+                searchRevision++
             } catch (e: Exception) {
                 error = e.message ?: "Failed to move directory to trash"
             } finally {
@@ -730,6 +791,36 @@ fun NcloudApp() {
     LaunchedEffect(session?.accessToken) {
         if (session != null && directory == null && !loading) {
             loadDirectory()
+        }
+    }
+
+    LaunchedEffect(searchQuery, directory?.current?.id, session?.accessToken, searchRevision) {
+        val activeSession = session
+        val activeDirectory = directory?.current
+        val activeBundle = directory
+        val query = searchQuery.trim()
+
+        if (query.isBlank()) {
+            searchResults = null
+            searching = false
+            return@LaunchedEffect
+        }
+
+        if (activeSession == null || activeDirectory == null || activeBundle == null) {
+            return@LaunchedEffect
+        }
+
+        delay(300)
+        searching = true
+
+        try {
+            val rawResults = api().searchDirectory(activeSession, activeDirectory, query)
+            searchResults = mergeSearchResults(rawResults, activeBundle)
+        } catch (e: Exception) {
+            error = e.message ?: "Search failed"
+            searchResults = SearchResults(emptyList(), emptyList())
+        } finally {
+            searching = false
         }
     }
 
@@ -752,14 +843,18 @@ fun NcloudApp() {
                 username = session?.username.orEmpty(),
                 directory = directory,
                 loading = loading,
+                searching = searching,
                 error = error,
+                searchQuery = searchQuery,
+                searchResults = searchResults,
                 canGoBack = history.isNotEmpty(),
-                onOpenDirectory = { loadDirectory(it, true) },
+                onSearchQueryChange = { searchQuery = it },
+                onOpenDirectory = { loadDirectory(it, true, true) },
                 onRefresh = { loadDirectory(directory?.current) },
                 onBack = {
                     if (history.isNotEmpty()) {
                         val previous = history.removeAt(history.lastIndex)
-                        loadDirectory(previous, false)
+                        loadDirectory(previous, false, true)
                     }
                 },
                 onLogout = { logout() },
@@ -887,8 +982,12 @@ fun DriveScreen(
     username: String,
     directory: DirectoryBundle?,
     loading: Boolean,
+    searching: Boolean,
     error: String?,
+    searchQuery: String,
+    searchResults: SearchResults?,
     canGoBack: Boolean,
+    onSearchQueryChange: (String) -> Unit,
     onOpenDirectory: (NcloudDirectory) -> Unit,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
@@ -907,6 +1006,19 @@ fun DriveScreen(
     var renameTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var deleteTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var pendingDownloadFile by remember { mutableStateOf<NcloudFile?>(null) }
+
+    val searchActive = searchQuery.trim().isNotBlank()
+    val folders = if (searchActive) {
+        searchResults?.directories.orEmpty()
+    } else {
+        directory?.directories.orEmpty()
+    }
+
+    val files = if (searchActive) {
+        searchResults?.files.orEmpty()
+    } else {
+        directory?.files.orEmpty()
+    }
 
     val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         onUpload(uris)
@@ -972,8 +1084,15 @@ fun DriveScreen(
                     .fillMaxWidth()
                     .padding(18.dp)
             ) {
+                SearchBar(
+                    query = searchQuery,
+                    onQueryChange = onSearchQueryChange
+                )
+
+                Spacer(Modifier.height(16.dp))
+
                 Text(
-                    text = directory?.current?.name ?: "Drive",
+                    text = if (searchActive) "Search results" else directory?.current?.name ?: "Drive",
                     color = AppText,
                     style = MaterialTheme.typography.headlineSmall,
                     maxLines = 1,
@@ -1011,6 +1130,17 @@ fun DriveScreen(
                     }
                 }
 
+                if (searchActive) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "Searching in ${directory?.current?.name ?: "current folder"}",
+                        color = AppMuted,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
                 if (error != null) {
                     Spacer(Modifier.height(12.dp))
                     Text(
@@ -1022,9 +1152,6 @@ fun DriveScreen(
             }
 
             Box(Modifier.fillMaxSize()) {
-                val folders = directory?.directories.orEmpty()
-                val files = directory?.files.orEmpty()
-
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(145.dp),
                     contentPadding = PaddingValues(16.dp),
@@ -1053,19 +1180,19 @@ fun DriveScreen(
                     }
                 }
 
-                if (directory != null && folders.isEmpty() && files.isEmpty() && !loading) {
+                if (directory != null && folders.isEmpty() && files.isEmpty() && !loading && !searching) {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "This folder is empty",
+                            text = if (searchActive) "No results found" else "This folder is empty",
                             color = AppMuted
                         )
                     }
                 }
 
-                if (loading) {
+                if (loading || searching) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -1171,6 +1298,36 @@ fun DriveScreen(
             }
         )
     }
+}
+
+@Composable
+fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        placeholder = {
+            Text(
+                text = "Search files and directories",
+                color = AppMuted
+            )
+        },
+        leadingIcon = {
+            Text(
+                text = "⌕",
+                color = AppMuted,
+                style = MaterialTheme.typography.titleLarge
+            )
+        },
+        trailingIcon = {
+            if (query.isNotBlank()) {
+                TextButton(onClick = { onQueryChange("") }) {
+                    Text("Clear")
+                }
+            }
+        },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth()
+    )
 }
 
 @Composable
@@ -1613,6 +1770,21 @@ fun NcloudActionTarget.itemName(): String {
         is NcloudActionTarget.FileTarget -> file.name
         is NcloudActionTarget.DirectoryTarget -> directory.name
     }
+}
+
+fun mergeSearchResults(searchResults: SearchResults, directory: DirectoryBundle): SearchResults {
+    val directories = searchResults.directories.map { result ->
+        directory.directories.firstOrNull { it.id == result.id } ?: result
+    }
+
+    val files = searchResults.files.map { result ->
+        directory.files.firstOrNull { it.id == result.id } ?: result
+    }
+
+    return SearchResults(
+        directories = directories,
+        files = files
+    )
 }
 
 fun JSONObject.stringValue(vararg keys: String): String {
