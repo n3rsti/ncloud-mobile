@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -92,6 +90,13 @@ import com.example.ncloud.util.formatTimestamp
 import com.example.ncloud.util.readableSize
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.zIndex
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 
 val AppBg = Color(0xFF0B0F1A)
 val AppTop = Color(0xFF0E1420)
@@ -622,7 +627,7 @@ fun AuthScreen(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DriveScreen(
     username: String,
@@ -651,14 +656,13 @@ fun DriveScreen(
 ) {
     var showCreateFolder by remember { mutableStateOf(false) }
     var searchVisible by remember { mutableStateOf(false) }
+    var drawerOpen by remember { mutableStateOf(false) }
     var selectedTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var detailsTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var renameTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var deleteTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var pendingDownloadFile by remember { mutableStateOf<NcloudFile?>(null) }
 
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
     val searchActive = searchQuery.trim().isNotBlank()
 
     val folders = if (searchActive) {
@@ -673,12 +677,21 @@ fun DriveScreen(
         directory?.files.orEmpty()
     }
 
-    BackHandler(enabled = canNavigateBack || searchVisible) {
-        if (searchVisible) {
-            searchVisible = false
-        }
+    BackHandler(enabled = drawerOpen || canNavigateBack || searchVisible) {
+        when {
+            drawerOpen -> {
+                drawerOpen = false
+            }
 
-        onNavigateBack()
+            searchVisible -> {
+                searchVisible = false
+                onSearchQueryChange("")
+            }
+
+            else -> {
+                onNavigateBack()
+            }
+        }
     }
 
     val uploadLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
@@ -695,29 +708,7 @@ fun DriveScreen(
         pendingDownloadFile = null
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            NcloudDrawer(
-                username = username,
-                isTrash = isTrash,
-                onOpenDrive = {
-                    searchVisible = false
-                    scope.launch {
-                        drawerState.close()
-                        onOpenDrive()
-                    }
-                },
-                onOpenTrash = {
-                    searchVisible = false
-                    scope.launch {
-                        drawerState.close()
-                        onOpenTrash()
-                    }
-                }
-            )
-        }
-    ) {
+    Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             containerColor = AppBg,
             floatingActionButton = {
@@ -741,9 +732,7 @@ fun DriveScreen(
             ) {
                 AppHeader(
                     onMenuClick = {
-                        scope.launch {
-                            drawerState.open()
-                        }
+                        drawerOpen = true
                     },
                     onSearchClick = {
                         searchVisible = true
@@ -774,25 +763,25 @@ fun DriveScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 18.dp, vertical = 18.dp)
                 ) {
-                    Text(
-                        text = if (searchActive) "Global search results" else directory?.current?.name ?: "Drive",
-                        color = AppText,
-                        style = MaterialTheme.typography.headlineSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-
-                    Spacer(Modifier.height(14.dp))
-
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Text(
+                            text = if (searchActive) "Global search results" else directory?.current?.name ?: "Drive",
+                            color = AppText,
+                            style = MaterialTheme.typography.headlineSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        Spacer(Modifier.width(14.dp))
+
                         Button(
                             enabled = directory != null && !loading,
                             onClick = { showCreateFolder = true },
-                            colors = ButtonDefaults.buttonColors(containerColor = AppPurple),
-                            modifier = Modifier.fillMaxWidth()
+                            colors = ButtonDefaults.buttonColors(containerColor = AppPurple)
                         ) {
                             Text("New folder")
                         }
@@ -879,6 +868,51 @@ fun DriveScreen(
                     }
                 }
             }
+        }
+
+        AnimatedVisibility(
+            visible = drawerOpen,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(10f)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        drawerOpen = false
+                    }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = drawerOpen,
+            enter = slideInHorizontally(initialOffsetX = { -it }) + fadeIn(),
+            exit = slideOutHorizontally(targetOffsetX = { -it }) + fadeOut(),
+            modifier = Modifier
+                .zIndex(11f)
+                .align(Alignment.CenterStart)
+        ) {
+            NcloudDrawer(
+                username = username,
+                isTrash = isTrash,
+                onOpenDrive = {
+                    drawerOpen = false
+                    searchVisible = false
+                    onOpenDrive()
+                },
+                onOpenTrash = {
+                    drawerOpen = false
+                    searchVisible = false
+                    onOpenTrash()
+                }
+            )
         }
     }
 
@@ -975,6 +1009,7 @@ fun DriveScreen(
         )
     }
 }
+
 
 @Composable
 fun AppHeader(
