@@ -257,6 +257,25 @@ class NcloudApi(
         )
     }
 
+    suspend fun loadFileBytes(
+        directory: NcloudDirectory,
+        file: NcloudFile
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val session = sessionStore.load() ?: throw SessionExpiredException()
+        var response = loadFileBytesOnce(session, directory, file)
+
+        if (response.code == 401) {
+            val refreshedSession = refreshSession(session)
+            response = loadFileBytesOnce(refreshedSession, directory, file)
+        }
+
+        if (response.code !in 200..299) {
+            throw NcloudException(parseError(response.errorBody, response.code))
+        }
+
+        response.bytes
+    }
+
     suspend fun downloadFile(
         context: Context,
         directory: NcloudDirectory,
@@ -384,6 +403,40 @@ class NcloudApi(
             val responseBody = readResponse(connection, code)
 
             return RawResponse(code, responseBody)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun loadFileBytesOnce(
+        session: AuthSession,
+        directory: NcloudDirectory,
+        file: NcloudFile
+    ): RawBytesResponse {
+        val connection = openConnection("/files/${file.id}")
+
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 15000
+            connection.readTimeout = 120000
+            connection.setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+            connection.setRequestProperty("DirectoryAccessKey", directory.accessKey)
+
+            val code = connection.responseCode
+
+            return if (code in 200..299) {
+                RawBytesResponse(
+                    code = code,
+                    bytes = connection.inputStream.use { it.readBytes() },
+                    errorBody = ""
+                )
+            } else {
+                RawBytesResponse(
+                    code = code,
+                    bytes = ByteArray(0),
+                    errorBody = readResponse(connection, code)
+                )
+            }
         } finally {
             connection.disconnect()
         }
@@ -538,5 +591,11 @@ class NcloudApi(
     private data class RawResponse(
         val code: Int,
         val body: String
+    )
+
+    private data class RawBytesResponse(
+        val code: Int,
+        val bytes: ByteArray,
+        val errorBody: String
     )
 }

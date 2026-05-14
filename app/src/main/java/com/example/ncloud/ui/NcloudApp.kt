@@ -1,12 +1,20 @@
 package com.example.ncloud.ui
 
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +26,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -39,7 +48,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -47,19 +55,18 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -68,12 +75,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.example.ncloud.models.AuthSession
 import com.example.ncloud.models.DirectoryBundle
 import com.example.ncloud.models.NcloudActionTarget
@@ -88,15 +99,10 @@ import com.example.ncloud.session.SessionStore
 import com.example.ncloud.util.directoryIdFromAccessKey
 import com.example.ncloud.util.formatTimestamp
 import com.example.ncloud.util.readableSize
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.ui.zIndex
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
+import kotlinx.coroutines.withContext
 
 val AppBg = Color(0xFF0B0F1A)
 val AppTop = Color(0xFF0E1420)
@@ -160,6 +166,12 @@ fun NcloudApp() {
         } else {
             api().loadDirectory(parentId).current
         }
+    }
+
+    suspend fun loadImageBytes(file: NcloudFile): ByteArray {
+        val activeDirectory = directory?.current ?: throw NcloudException("No active directory")
+        val parentDirectory = fileParentDirectory(file, activeDirectory)
+        return api().loadFileBytes(parentDirectory, file)
     }
 
     fun refreshCurrentDirectory(activeDirectory: NcloudDirectory) {
@@ -366,45 +378,25 @@ fun NcloudApp() {
         }
     }
 
-fun deleteFilePermanently(file: NcloudFile) {
-    val activeDirectory = directory?.current ?: return
+    fun deleteFilePermanently(file: NcloudFile) {
+        val activeDirectory = directory?.current ?: return
 
-    scope.launch {
-        loading = true
-        error = null
+        scope.launch {
+            loading = true
+            error = null
 
-        try {
-            val parentDirectory = fileParentDirectory(file, activeDirectory)
-            api().deleteFilePermanently(parentDirectory, file)
-            directory = api().loadDirectory(activeDirectory.id)
-            searchRevision++
-        } catch (e: Exception) {
-            handleFailure(e, "Failed to permanently delete file")
-        } finally {
-            loading = false
+            try {
+                val parentDirectory = fileParentDirectory(file, activeDirectory)
+                api().deleteFilePermanently(parentDirectory, file)
+                directory = api().loadDirectory(activeDirectory.id)
+                searchRevision++
+            } catch (e: Exception) {
+                handleFailure(e, "Failed to permanently delete file")
+            } finally {
+                loading = false
+            }
         }
     }
-}
-
-fun deleteDirectoryPermanently(targetDirectory: NcloudDirectory) {
-    val activeDirectory = directory?.current ?: return
-
-    scope.launch {
-        loading = true
-        error = null
-
-        try {
-            val fullTargetDirectory = api().loadDirectory(targetDirectory.id).current
-            api().deleteDirectoryPermanently(fullTargetDirectory)
-            directory = api().loadDirectory(activeDirectory.id)
-            searchRevision++
-        } catch (e: Exception) {
-            handleFailure(e, "Failed to permanently delete directory")
-        } finally {
-            loading = false
-        }
-    }
-}
 
     fun downloadFile(file: NcloudFile, targetUri: Uri) {
         val activeDirectory = directory?.current ?: return
@@ -462,6 +454,26 @@ fun deleteDirectoryPermanently(targetDirectory: NcloudDirectory) {
                 searchRevision++
             } catch (e: Exception) {
                 handleFailure(e, "Failed to move directory to trash")
+            } finally {
+                loading = false
+            }
+        }
+    }
+
+    fun deleteDirectoryPermanently(targetDirectory: NcloudDirectory) {
+        val activeDirectory = directory?.current ?: return
+
+        scope.launch {
+            loading = true
+            error = null
+
+            try {
+                val fullTargetDirectory = api().loadDirectory(targetDirectory.id).current
+                api().deleteDirectoryPermanently(fullTargetDirectory)
+                directory = api().loadDirectory(activeDirectory.id)
+                searchRevision++
+            } catch (e: Exception) {
+                handleFailure(e, "Failed to permanently delete directory")
             } finally {
                 loading = false
             }
@@ -530,35 +542,36 @@ fun deleteDirectoryPermanently(targetDirectory: NcloudDirectory) {
             val trashId = directoryIdFromAccessKey(session?.trashAccessKey.orEmpty())
             val isTrash = directory?.current?.id == trashId
 
-DriveScreen(
-    username = session?.username.orEmpty(),
-    directory = directory,
-    loading = loading,
-    searching = searching,
-    error = error,
-    searchQuery = searchQuery,
-    searchResults = searchResults,
-    canNavigateBack = history.isNotEmpty() || searchQuery.isNotBlank(),
-    isTrash = isTrash,
-    onSearchQueryChange = { searchQuery = it },
-    onOpenDirectory = { loadDirectory(it, true, true) },
-    onRefresh = {
-        directory?.current?.let { refreshCurrentDirectory(it) }
-    },
-    onNavigateBack = { navigateBack() },
-    onOpenDrive = { openDriveRoot() },
-    onOpenTrash = { openTrash() },
-    onLogout = { logout() },
-    onCreateFolder = { createFolder(it) },
-    onUpload = { uploadFiles(it) },
-    onRenameFile = { file, newName -> renameFile(file, newName) },
-    onMoveFileToTrash = { moveFileToTrash(it) },
-    onDeleteFilePermanently = { deleteFilePermanently(it) },
-    onDownloadFile = { file, targetUri -> downloadFile(file, targetUri) },
-    onRenameDirectory = { targetDirectory, newName -> renameDirectory(targetDirectory, newName) },
-    onMoveDirectoryToTrash = { moveDirectoryToTrash(it) },
-    onDeleteDirectoryPermanently = { deleteDirectoryPermanently(it) }
-)
+            DriveScreen(
+                username = session?.username.orEmpty(),
+                directory = directory,
+                loading = loading,
+                searching = searching,
+                error = error,
+                searchQuery = searchQuery,
+                searchResults = searchResults,
+                canNavigateBack = history.isNotEmpty() || searchQuery.isNotBlank(),
+                isTrash = isTrash,
+                loadImageBytes = { loadImageBytes(it) },
+                onSearchQueryChange = { searchQuery = it },
+                onOpenDirectory = { loadDirectory(it, true, true) },
+                onRefresh = {
+                    directory?.current?.let { refreshCurrentDirectory(it) }
+                },
+                onNavigateBack = { navigateBack() },
+                onOpenDrive = { openDriveRoot() },
+                onOpenTrash = { openTrash() },
+                onLogout = { logout() },
+                onCreateFolder = { createFolder(it) },
+                onUpload = { uploadFiles(it) },
+                onRenameFile = { file, newName -> renameFile(file, newName) },
+                onMoveFileToTrash = { moveFileToTrash(it) },
+                onDeleteFilePermanently = { deleteFilePermanently(it) },
+                onDownloadFile = { file, targetUri -> downloadFile(file, targetUri) },
+                onRenameDirectory = { targetDirectory, newName -> renameDirectory(targetDirectory, newName) },
+                onMoveDirectoryToTrash = { moveDirectoryToTrash(it) },
+                onDeleteDirectoryPermanently = { deleteDirectoryPermanently(it) }
+            )
         }
     }
 }
@@ -681,6 +694,7 @@ fun DriveScreen(
     searchResults: SearchResults?,
     canNavigateBack: Boolean,
     isTrash: Boolean,
+    loadImageBytes: suspend (NcloudFile) -> ByteArray,
     onSearchQueryChange: (String) -> Unit,
     onOpenDirectory: (NcloudDirectory) -> Unit,
     onRefresh: () -> Unit,
@@ -706,6 +720,8 @@ fun DriveScreen(
     var renameTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var deleteTarget by remember { mutableStateOf<NcloudActionTarget?>(null) }
     var pendingDownloadFile by remember { mutableStateOf<NcloudFile?>(null) }
+    var previewFile by remember { mutableStateOf<NcloudFile?>(null) }
+    val imageCache = remember { mutableStateMapOf<String, ImageBitmap>() }
 
     val searchActive = searchQuery.trim().isNotBlank()
 
@@ -721,8 +737,12 @@ fun DriveScreen(
         directory?.files.orEmpty()
     }
 
-    BackHandler(enabled = drawerOpen || canNavigateBack || searchVisible) {
+    BackHandler(enabled = drawerOpen || canNavigateBack || searchVisible || previewFile != null) {
         when {
+            previewFile != null -> {
+                previewFile = null
+            }
+
             drawerOpen -> {
                 drawerOpen = false
             }
@@ -889,7 +909,13 @@ fun DriveScreen(
                         items(files, key = { "file-${it.id}" }) { file ->
                             FileCard(
                                 file = file,
-                                onClick = {},
+                                imageCache = imageCache,
+                                loadImageBytes = loadImageBytes,
+                                onClick = {
+                                    if (file.isImageFile()) {
+                                        previewFile = file
+                                    }
+                                },
                                 onMenuClick = {
                                     selectedTarget = NcloudActionTarget.FileTarget(file)
                                 }
@@ -967,6 +993,15 @@ fun DriveScreen(
                 }
             )
         }
+    }
+
+    previewFile?.let { file ->
+        ImagePreviewDialog(
+            file = file,
+            imageCache = imageCache,
+            loadImageBytes = loadImageBytes,
+            onDismiss = { previewFile = null }
+        )
     }
 
     if (showCreateFolder) {
@@ -1086,7 +1121,6 @@ fun DriveScreen(
         )
     }
 }
-
 
 @Composable
 fun AppHeader(
@@ -1292,6 +1326,8 @@ fun FolderCard(
 @Composable
 fun FileCard(
     file: NcloudFile,
+    imageCache: MutableMap<String, ImageBitmap>,
+    loadImageBytes: suspend (NcloudFile) -> ByteArray,
     onClick: () -> Unit,
     onMenuClick: () -> Unit
 ) {
@@ -1299,7 +1335,11 @@ fun FileCard(
         onClick = onClick,
         onMenuClick = onMenuClick
     ) {
-        FileShape(type = file.type)
+        FilePreviewShape(
+            file = file,
+            imageCache = imageCache,
+            loadImageBytes = loadImageBytes
+        )
 
         Spacer(Modifier.height(12.dp))
 
@@ -1397,6 +1437,84 @@ fun FolderShape() {
 }
 
 @Composable
+fun FilePreviewShape(
+    file: NcloudFile,
+    imageCache: MutableMap<String, ImageBitmap>,
+    loadImageBytes: suspend (NcloudFile) -> ByteArray
+) {
+    if (!file.isImageFile()) {
+        FileShape(type = file.type)
+        return
+    }
+
+    val cacheKey = file.imageCacheKey()
+    val cachedBitmap = imageCache[cacheKey]
+    var loading by remember(cacheKey) { mutableStateOf(cachedBitmap == null) }
+    var failed by remember(cacheKey) { mutableStateOf(false) }
+
+    LaunchedEffect(cacheKey) {
+        if (cachedBitmap != null) {
+            loading = false
+            return@LaunchedEffect
+        }
+
+        loading = true
+        failed = false
+
+        try {
+            val bytes = loadImageBytes(file)
+            val decoded = withContext(Dispatchers.Default) {
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+            }
+
+            if (decoded != null) {
+                imageCache[cacheKey] = decoded
+            } else {
+                failed = true
+            }
+        } catch (_: Exception) {
+            failed = true
+        } finally {
+            loading = false
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .width(76.dp)
+            .height(72.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(AppPanel),
+        contentAlignment = Alignment.Center
+    ) {
+        val bitmap = imageCache[cacheKey]
+
+        when {
+            bitmap != null -> {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = file.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+
+            loading -> {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .width(28.dp)
+                        .height(28.dp)
+                )
+            }
+
+            failed -> {
+                FileShape(type = file.type)
+            }
+        }
+    }
+}
+
+@Composable
 fun FileShape(type: String) {
     val label = when {
         type.startsWith("image/") -> "IMG"
@@ -1420,6 +1538,99 @@ fun FileShape(type: String) {
             style = MaterialTheme.typography.labelMedium
         )
     }
+}
+
+@Composable
+fun ImagePreviewDialog(
+    file: NcloudFile,
+    imageCache: MutableMap<String, ImageBitmap>,
+    loadImageBytes: suspend (NcloudFile) -> ByteArray,
+    onDismiss: () -> Unit
+) {
+    val cacheKey = file.imageCacheKey()
+    var image by remember(cacheKey) { mutableStateOf(imageCache[cacheKey]) }
+    var loading by remember(cacheKey) { mutableStateOf(image == null) }
+    var error by remember(cacheKey) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(cacheKey) {
+        if (image != null) {
+            loading = false
+            return@LaunchedEffect
+        }
+
+        loading = true
+        error = null
+
+        try {
+            val bytes = loadImageBytes(file)
+            val decoded = withContext(Dispatchers.Default) {
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+            }
+
+            if (decoded == null) {
+                error = "Could not decode image"
+            } else {
+                imageCache[cacheKey] = decoded
+                image = decoded
+            }
+        } catch (e: Exception) {
+            error = e.message ?: "Could not load image"
+        } finally {
+            loading = false
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = AppPanel,
+        title = {
+            Text(
+                text = file.name,
+                color = AppText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        },
+        text = {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 220.dp, max = 520.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                when {
+                    image != null -> {
+                        Image(
+                            bitmap = image!!,
+                            contentDescription = file.name,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 220.dp, max = 520.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(AppBg)
+                        )
+                    }
+
+                    loading -> {
+                        CircularProgressIndicator()
+                    }
+
+                    error != null -> {
+                        Text(
+                            text = error.orEmpty(),
+                            color = AppError
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
 }
 
 @Composable
@@ -1704,4 +1915,19 @@ fun DeleteItemDialog(
             }
         }
     )
+}
+
+fun NcloudFile.isImageFile(): Boolean {
+    val lowerName = name.lowercase()
+    return type.startsWith("image/") ||
+        lowerName.endsWith(".jpg") ||
+        lowerName.endsWith(".jpeg") ||
+        lowerName.endsWith(".png") ||
+        lowerName.endsWith(".gif") ||
+        lowerName.endsWith(".webp") ||
+        lowerName.endsWith(".bmp")
+}
+
+fun NcloudFile.imageCacheKey(): String {
+    return "$id:$modified"
 }
