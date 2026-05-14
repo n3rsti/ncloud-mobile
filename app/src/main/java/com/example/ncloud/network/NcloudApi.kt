@@ -160,6 +160,22 @@ class NcloudApi(
         )
     }
 
+    suspend fun deleteDirectoryPermanently(directory: NcloudDirectory) = withContext(Dispatchers.IO) {
+        val body = JSONArray()
+            .put(
+                JSONObject()
+                    .put("id", directory.id)
+                    .put("access_key", directory.accessKey)
+            )
+            .toString()
+
+        authenticatedRequest(
+            method = "POST",
+            path = "/api/directories/delete",
+            body = body
+        )
+    }
+
     suspend fun uploadFiles(
         context: Context,
         directory: NcloudDirectory,
@@ -217,6 +233,26 @@ class NcloudApi(
         authenticatedRequest(
             method = "POST",
             path = "/api/files/move",
+            body = body
+        )
+    }
+
+    suspend fun deleteFilePermanently(
+        directory: NcloudDirectory,
+        file: NcloudFile
+    ) = withContext(Dispatchers.IO) {
+        val body = JSONArray()
+            .put(
+                JSONObject()
+                    .put("id", directory.id)
+                    .put("access_key", directory.accessKey)
+                    .put("files", JSONArray().put(file.id))
+            )
+            .toString()
+
+        authenticatedRequest(
+            method = "POST",
+            path = "/api/files/delete",
             body = body
         )
     }

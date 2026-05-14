@@ -366,6 +366,46 @@ fun NcloudApp() {
         }
     }
 
+fun deleteFilePermanently(file: NcloudFile) {
+    val activeDirectory = directory?.current ?: return
+
+    scope.launch {
+        loading = true
+        error = null
+
+        try {
+            val parentDirectory = fileParentDirectory(file, activeDirectory)
+            api().deleteFilePermanently(parentDirectory, file)
+            directory = api().loadDirectory(activeDirectory.id)
+            searchRevision++
+        } catch (e: Exception) {
+            handleFailure(e, "Failed to permanently delete file")
+        } finally {
+            loading = false
+        }
+    }
+}
+
+fun deleteDirectoryPermanently(targetDirectory: NcloudDirectory) {
+    val activeDirectory = directory?.current ?: return
+
+    scope.launch {
+        loading = true
+        error = null
+
+        try {
+            val fullTargetDirectory = api().loadDirectory(targetDirectory.id).current
+            api().deleteDirectoryPermanently(fullTargetDirectory)
+            directory = api().loadDirectory(activeDirectory.id)
+            searchRevision++
+        } catch (e: Exception) {
+            handleFailure(e, "Failed to permanently delete directory")
+        } finally {
+            loading = false
+        }
+    }
+}
+
     fun downloadFile(file: NcloudFile, targetUri: Uri) {
         val activeDirectory = directory?.current ?: return
 
@@ -490,33 +530,35 @@ fun NcloudApp() {
             val trashId = directoryIdFromAccessKey(session?.trashAccessKey.orEmpty())
             val isTrash = directory?.current?.id == trashId
 
-            DriveScreen(
-                username = session?.username.orEmpty(),
-                directory = directory,
-                loading = loading,
-                searching = searching,
-                error = error,
-                searchQuery = searchQuery,
-                searchResults = searchResults,
-                canNavigateBack = history.isNotEmpty() || searchQuery.isNotBlank(),
-                isTrash = isTrash,
-                onSearchQueryChange = { searchQuery = it },
-                onOpenDirectory = { loadDirectory(it, true, true) },
-                onRefresh = {
-                    directory?.current?.let { refreshCurrentDirectory(it) }
-                },
-                onNavigateBack = { navigateBack() },
-                onOpenDrive = { openDriveRoot() },
-                onOpenTrash = { openTrash() },
-                onLogout = { logout() },
-                onCreateFolder = { createFolder(it) },
-                onUpload = { uploadFiles(it) },
-                onRenameFile = { file, newName -> renameFile(file, newName) },
-                onMoveFileToTrash = { moveFileToTrash(it) },
-                onDownloadFile = { file, targetUri -> downloadFile(file, targetUri) },
-                onRenameDirectory = { targetDirectory, newName -> renameDirectory(targetDirectory, newName) },
-                onMoveDirectoryToTrash = { moveDirectoryToTrash(it) }
-            )
+DriveScreen(
+    username = session?.username.orEmpty(),
+    directory = directory,
+    loading = loading,
+    searching = searching,
+    error = error,
+    searchQuery = searchQuery,
+    searchResults = searchResults,
+    canNavigateBack = history.isNotEmpty() || searchQuery.isNotBlank(),
+    isTrash = isTrash,
+    onSearchQueryChange = { searchQuery = it },
+    onOpenDirectory = { loadDirectory(it, true, true) },
+    onRefresh = {
+        directory?.current?.let { refreshCurrentDirectory(it) }
+    },
+    onNavigateBack = { navigateBack() },
+    onOpenDrive = { openDriveRoot() },
+    onOpenTrash = { openTrash() },
+    onLogout = { logout() },
+    onCreateFolder = { createFolder(it) },
+    onUpload = { uploadFiles(it) },
+    onRenameFile = { file, newName -> renameFile(file, newName) },
+    onMoveFileToTrash = { moveFileToTrash(it) },
+    onDeleteFilePermanently = { deleteFilePermanently(it) },
+    onDownloadFile = { file, targetUri -> downloadFile(file, targetUri) },
+    onRenameDirectory = { targetDirectory, newName -> renameDirectory(targetDirectory, newName) },
+    onMoveDirectoryToTrash = { moveDirectoryToTrash(it) },
+    onDeleteDirectoryPermanently = { deleteDirectoryPermanently(it) }
+)
         }
     }
 }
@@ -650,9 +692,11 @@ fun DriveScreen(
     onUpload: (List<Uri>) -> Unit,
     onRenameFile: (NcloudFile, String) -> Unit,
     onMoveFileToTrash: (NcloudFile) -> Unit,
+    onDeleteFilePermanently: (NcloudFile) -> Unit,
     onDownloadFile: (NcloudFile, Uri) -> Unit,
     onRenameDirectory: (NcloudDirectory, String) -> Unit,
-    onMoveDirectoryToTrash: (NcloudDirectory) -> Unit
+    onMoveDirectoryToTrash: (NcloudDirectory) -> Unit,
+    onDeleteDirectoryPermanently: (NcloudDirectory) -> Unit
 ) {
     var showCreateFolder by remember { mutableStateOf(false) }
     var searchVisible by remember { mutableStateOf(false) }
@@ -779,7 +823,7 @@ fun DriveScreen(
                         Spacer(Modifier.width(14.dp))
 
                         Button(
-                            enabled = directory != null && !loading,
+                            enabled = directory != null && !loading && !isTrash,
                             onClick = { showCreateFolder = true },
                             colors = ButtonDefaults.buttonColors(containerColor = AppPurple)
                         ) {
@@ -795,6 +839,15 @@ fun DriveScreen(
                             style = MaterialTheme.typography.bodySmall,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    if (isTrash) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            text = "Items deleted here are removed permanently.",
+                            color = AppMuted,
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
 
@@ -930,6 +983,7 @@ fun DriveScreen(
         ItemOptionsDialog(
             title = target.itemName(),
             showDownload = target is NcloudActionTarget.FileTarget,
+            destructiveText = if (isTrash) "Delete permanently" else "Delete",
             onDismiss = { selectedTarget = null },
             onDetails = {
                 selectedTarget = null
@@ -995,15 +1049,38 @@ fun DriveScreen(
 
     deleteTarget?.let { target ->
         DeleteItemDialog(
-            title = if (target is NcloudActionTarget.FileTarget) "Delete file" else "Delete directory",
+            title = if (isTrash) {
+                if (target is NcloudActionTarget.FileTarget) "Permanently delete file" else "Permanently delete directory"
+            } else {
+                if (target is NcloudActionTarget.FileTarget) "Delete file" else "Delete directory"
+            },
             itemName = target.itemName(),
+            message = if (isTrash) {
+                "Do you want to permanently delete this item? This action cannot be undone."
+            } else {
+                "Do you want to move this item to trash?"
+            },
+            confirmText = if (isTrash) "Delete permanently" else "Delete",
             onDismiss = { deleteTarget = null },
             onDelete = {
                 deleteTarget = null
 
                 when (target) {
-                    is NcloudActionTarget.FileTarget -> onMoveFileToTrash(target.file)
-                    is NcloudActionTarget.DirectoryTarget -> onMoveDirectoryToTrash(target.directory)
+                    is NcloudActionTarget.FileTarget -> {
+                        if (isTrash) {
+                            onDeleteFilePermanently(target.file)
+                        } else {
+                            onMoveFileToTrash(target.file)
+                        }
+                    }
+
+                    is NcloudActionTarget.DirectoryTarget -> {
+                        if (isTrash) {
+                            onDeleteDirectoryPermanently(target.directory)
+                        } else {
+                            onMoveDirectoryToTrash(target.directory)
+                        }
+                    }
                 }
             }
         )
@@ -1387,6 +1464,7 @@ fun CreateFolderDialog(onDismiss: () -> Unit, onCreate: (String) -> Unit) {
 fun ItemOptionsDialog(
     title: String,
     showDownload: Boolean,
+    destructiveText: String,
     onDismiss: () -> Unit,
     onDetails: () -> Unit,
     onRename: () -> Unit,
@@ -1427,7 +1505,7 @@ fun ItemOptionsDialog(
                 }
 
                 FileActionButton(
-                    text = "Delete",
+                    text = destructiveText,
                     color = Color(0xFFFF4B55),
                     onClick = onDelete
                 )
@@ -1582,6 +1660,8 @@ fun RenameItemDialog(
 fun DeleteItemDialog(
     title: String,
     itemName: String,
+    message: String,
+    confirmText: String,
     onDismiss: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -1597,7 +1677,7 @@ fun DeleteItemDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "Do you want to move this item to trash?",
+                    text = message,
                     color = AppMuted
                 )
 
@@ -1615,7 +1695,7 @@ fun DeleteItemDialog(
                 onClick = onDelete,
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE52632))
             ) {
-                Text("Delete")
+                Text(confirmText)
             }
         },
         dismissButton = {
